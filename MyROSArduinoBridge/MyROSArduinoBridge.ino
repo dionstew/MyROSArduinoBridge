@@ -365,7 +365,7 @@ void loop() {
   
   if (millis() > nextPID) {
     updatePID();
-    printDebugMsg();
+    // printDebugMsg();
     nextPID += PID_INTERVAL;
   }
 
