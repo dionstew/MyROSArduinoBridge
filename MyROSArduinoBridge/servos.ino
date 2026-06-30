@@ -30,6 +30,7 @@ void SweepServo::initServo(
   this->stepDelayMs = stepDelayMs;
   this->currentPositionDegrees = initPosition;
   this->targetPositionDegrees = initPosition;
+  this->servo.write(initPosition);          // <--- penting
   this->lastSweepCommand = millis();
 }
 
@@ -37,10 +38,9 @@ void SweepServo::initServo(
 // Perform Sweep
 void SweepServo::doSweep()
 {
-
   // Get ellapsed time
-  int delta = millis() - this->lastSweepCommand;
-
+  unsigned long delta = millis() - this->lastSweepCommand;
+  
   // Check if time for a step
   if (delta > this->stepDelayMs) {
     // Check step direction
@@ -59,6 +59,11 @@ void SweepServo::doSweep()
   }
 }
 
+// Go to the next position
+void SweepServo::jumpSweep()
+{
+  this->servo.write(this->targetPositionDegrees);
+}
 
 // Set a new target position
 void SweepServo::setTargetPosition(int position)

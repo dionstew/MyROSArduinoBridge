@@ -80,54 +80,114 @@
 #include "commands.h"                 // Include definition of serial commands
 
 #ifdef USE_BASE                       // Define the motor controller and encoder library you are using
-#include "encoder_driver.h"           // Encoder driver function definitions
-#include "motor_driver.h"             // Motor driver function definitions
-#include "diff_controller.h"          // PID parameters and functions
-#include "sensors.h"                  // Sensor functions
-#include "brakes.h"                   // Brakes functions
-#endif
+  #include "encoder_driver.h"           // Encoder driver function definitions
+  #include "motor_driver.h"             // Motor driver function definitions
+  #include "sensors.h"                  // Sensor functions
+  #include "brakes.h"                   // Brakes functions
+  
+  #ifdef DIFFDRIVE_CONTROLLER
+    #include "diff_controller.h"          // PID parameters and functions of diffdrive_controller
+  #endif                                        // endif DIFFDRIVE_CONTROLLER
+  
+  #ifdef CAMDRIVE_CONTROLLER
+    #include "camdrive_controller.h"      // PID parameters and functions of camdrive_controller
+  #endif                                        // endif CAMDRIVE_CONTROLLER
+#endif                                        // endif USE_BASE
 
 #ifdef USE_SERVOS  // Include servo support if defined
-#include <Servo.h>
-#include "servos.h"
+  #include <Servo.h>
+  #include "servos.h"
 #endif
 
 #ifdef MEGA_I2C_NANO_ENC_COUNTER
-EncoderData encoderLeft;
-EncoderData encoderRight;
+  EncoderData encoderLeft;
+  EncoderData encoderRight;
 #endif
 
-const int PID_INTERVAL  = 1000 / PID_RATE;  // Convert the rate into an interval
-unsigned long nextPID   = PID_INTERVAL;      // Track the next time we make a PID calculation
-long lastMotorCommand   = AUTO_STOP_INTERVAL;
+#ifdef ENCODER_DISK_20PPR
+  EncoderData encoderLeft;
+  EncoderData encoderRight;
+  volatile uint8_t prev_stateA = 0;  
+  volatile uint8_t prev_stateB = 0;
+  volatile long encoder_ticksA = 0;
+  volatile long encoder_ticksB = 0;
+  volatile int8_t g_left_dir_sign  = 0;  // +1 forward, -1 backward, 0 stopped/brake
+  volatile int8_t g_right_dir_sign = 0;
+#endif
+
+const int PID_INTERVAL  = 1000 / PID_RATE;    // Convert the rate into an interval (time sampling)
+unsigned long nextPID   = PID_INTERVAL;       // Track the next time we make a PID calculation
+long lastMotorCommand   = AUTO_STOP_INTERVAL; 
 
 /* Variable initialization */
 int arg         = 0;  // A pair of varibles to help parse serial commands (thanks Fergs)
 int index       = 0;
 char chr;             // Variable to hold an input character
 char cmd;             // Variable to hold the current single-character command
-char argv1[16];       // Character arrays to hold the first and second arguments
-char argv2[16];
-long arg1;  // The arguments converted to integers
+char argv1[30];       // Character arrays to hold command arguments
+char argv2[30];
+char argv3[30];       // Added for timing transaction: f <seq> <left> <right>
+long arg1;            // The arguments converted to integers
 long arg2;
+long arg3;
+int ang_ser = 0;
+char buffer[100];
+
+//========== TIMING ANALYSIS / TRANSACTION INSTRUMENTATION ==========//
+unsigned long g_cmd_rx_us = 0;
+unsigned long g_last_command_us = 0;
+unsigned long g_last_target_update_us = 0;
+unsigned long g_last_encoder_read_us = 0;
+unsigned long g_last_feedback_tx_us = 0;
+unsigned long g_last_pid_update_us = 0;
+
+unsigned long g_cmd_rx_count = 0;
+unsigned long g_feedback_tx_count = 0;
+unsigned long g_timeout_count = 0;
+unsigned long g_parse_error_count = 0;
+unsigned long g_safe_stop_count = 0;
+
+uint8_t g_status_code = STATUS_NORMAL;
+bool g_in_timeout_safe_stop = false;
 
 void resetCommand() {  // Clear the current command parameters
   cmd = NULL;
   memset(argv1, 0, sizeof(argv1));
   memset(argv2, 0, sizeof(argv2));
+  memset(argv3, 0, sizeof(argv3));
   arg1  = 0;
   arg2  = 0;
+  arg3  = 0;
   arg   = 0;
   index = 0;
 }
+bool hasArg1() {
+  return argv1[0] != '\0';
+}
 
+bool hasArg2() {
+  return argv2[0] != '\0';
+}
+
+bool hasArg3() {
+  return argv3[0] != '\0';
+}
+
+bool requireArgs(uint8_t n) {
+  if (n >= 1 && !hasArg1()) return false;
+  if (n >= 2 && !hasArg2()) return false;
+  if (n >= 3 && !hasArg3()) return false;
+  return true;
+}
 int runCommand() {  // Run a command.  Commands are defined in commands.h
-  int i   = 0;
-  char *p = argv1;
-  char *str;
-  int pid_args[4];
-  arg1    = atoi(argv1);
-  arg2    = atoi(argv2);
+  char  *str;
+  int   pid_args[4];
+  
+  int   i     = 0;
+  char  *p    = argv1;
+  arg1        = atoi(argv1);
+  arg2        = atoi(argv2);
+  arg3        = atoi(argv3);
 
   switch (cmd) {
     case GET_BAUDRATE:
@@ -169,7 +229,9 @@ int runCommand() {  // Run a command.  Commands are defined in commands.h
 
     #ifdef USE_SERVOS
     case SERVO_WRITE:
-      servos[arg1].setTargetPosition(arg2);
+      if (arg1 < 0 || arg1 >= N_SERVOS) { Serial.println("ERR"); break; }
+      int pos = constrain((int)arg2, 0, 180);
+      servos[arg1].setTargetPosition(pos);
       Serial.println("OK");
       break;
 
@@ -180,58 +242,69 @@ int runCommand() {  // Run a command.  Commands are defined in commands.h
 
   #ifdef USE_BASE
     case READ_ENCODERS:  // Modify inside this part. Could be set a conditional statements
-    #if defined(MEGA_I2C_NANO_ENC_COUNTER)  // Reading encoder data with Nano I2C configuration
-      readEncoder_I2C(ADDR_NANO_LEFT,  encoderLeft);                 // Reading left encoder data with Nano I2C configuration
-      readEncoder_I2C(ADDR_NANO_RIGHT, encoderRight);               // Reading right encoder data with Nano I2C configuration
-      Serial.print(encoderLeft.ticks);      
-      Serial.print(" ");
-      Serial.println(encoderRight.ticks);
-    #else
-      Serial.print(readEncoder(LEFT));      // Reading left encoder data with standard configuration
-      Serial.print(" ");  
-      Serial.println(readEncoder(RIGHT));   // Reading right encoder data with standard configuration
-    #endif
+      #if defined(MEGA_I2C_NANO_ENC_COUNTER)  // Reading encoder data with Nano I2C configuration
+        readEncoder_I2C(ADDR_NANO_LEFT,  encoderLeft);                 // Reading left encoder data with Nano I2C configuration
+        readEncoder_I2C(ADDR_NANO_RIGHT, encoderRight);               // Reading right encoder data with Nano I2C configuration
+        Serial.print(encoderLeft.ticks);      
+        Serial.print(" ");
+        Serial.println(encoderRight.ticks);
+              
+      #elif defined(ENCODER_DISK_20PPR)
+        // readEncoder_20PPR(LEFT, encoderLeft);
+        // readEncoder_20PPR(RIGHT, encoderRight);
+        // Serial.print(encoderLeft.ticks);
+        // Serial.print(" ");
+        // Serial.println(encoderRight.ticks);
+        Serial.println("cuk gagal terus");
+      #else
+        Serial.print(readEncoder(LEFT));      // Reading left encoder data with standard configuration
+        Serial.print(" ");  
+        Serial.println(readEncoder(RIGHT));   // Reading right encoder data with standard configuration
+      #endif
       break;
 
     case RESET_ENCODERS:                    // Modify inside this part. Could be set conditional statements
-    #if defined(MEGA_I2C_NANO_ENC_COUNTER)  // Reset encoder data with Nano I2C configuration
-      resetEncoders_I2C();                  
-      resetPID();
+      #if defined(MEGA_I2C_NANO_ENC_COUNTER)  // Reset encoder data with Nano I2C configuration
+        resetEncoders_I2C();                  
+        resetPID();
+        Serial.println("OK");
+      #elif defined(ENCODER_DISK_20PPR)
+        resetEncoder_20PPR();
+        Serial.println("OK");
+      #else
+        resetEncoders();                      // Reset encoder data with standard configuration
+        resetPID();
+        Serial.println("OK");
+      #endif
+      break;
+      
+    case MOTOR_SPEEDS:
+      // Legacy command used by the original ROSArduinoBridge hardware interface.
+      applyDiffDriveCommand(arg1, arg2);      
       Serial.println("OK");
-    #else
-      resetEncoders();                      // Reset encoder data with standard configuration
-      resetPID();
-      Serial.println("OK");
-    #endif
       break;
 
-    case MOTOR_SPEEDS:
-      lastMotorCommand = millis();  // Reset the auto stop timer
-      if (arg1 == 0 && arg2 == 0) {
-        setMotorSpeeds(0, 0);
-        resetPID();
-        moving = 0;
-      } 
-      else {
-        moving = 1;
-        setAllBrakes(false, false);
-      } 
-      leftPID.TargetTicksPerFrame   = arg1;
-      rightPID.TargetTicksPerFrame  = arg2;
-      // #if defined(DEBUG)
-      // Serial.print("SP-Left:");
-      // Serial.print(leftPID.TargetTicksPerFrame);
-      // Serial.print("\tSP-Right:");
-      // Serial.println(rightPID.TargetTicksPerFrame);   
-      // #endif   
+    case TIMING_TRANSACTION:
+      // New transaction command for distributed MCU timing analysis:
+      // f <seq_id> <left_cmd> <right_cmd>
+      // Response:
+      // fb <seq_id> <cmd_rx_us> <target_update_us> <encoder_read_us> <feedback_tx_us> <left_ticks> <right_ticks> <status_code>
+      g_cmd_rx_us = micros();
+      g_cmd_rx_count++;
+      applyDiffDriveCommand(arg2, arg3);
+      sendTimingFeedback((unsigned long)arg1, arg2, arg3);
       break;
     
     case MOTOR_RAW_PWM:
       lastMotorCommand = millis();  // Reset the auto stop timer
+      g_last_command_us = micros();
+      g_in_timeout_safe_stop = false;
+      g_status_code = STATUS_NORMAL;
       resetPID();
       setAllBrakes(false, false);
       moving = 0;  // Sneaky way to temporarily disable the PID
       setMotorSpeeds(arg1, arg2);
+      g_last_target_update_us = micros();
       Serial.println("OK");
       break;
     
@@ -244,14 +317,16 @@ int runCommand() {  // Run a command.  Commands are defined in commands.h
       Ki = pid_args[1];
       Kd = pid_args[2];
       Ko = pid_args[3];
-      Serial.println("OK");
       break;
   #endif
     
     case ALL_BRAKE_OFF:
       setAllBrakes(false, false);
-
+      break;
+      
     default:
+      // g_status_code = STATUS_INVALID_COMMAND;
+      // g_parse_error_count++;
       Serial.println("Invalid Command");
       break;
   }
@@ -262,38 +337,20 @@ void setup() {
   Serial.begin(BAUDRATE);
   Serial.println("Init...");
   // Initialize the motor controller if used */
+  // Initialization Encoders
   #if defined(USE_BASE)
-    
     #if defined(ARDUINO_ENC_COUNTER)
-      //set as inputs
-      DDRD &= ~(1 << LEFT_ENC_PIN_A);
-      DDRD &= ~(1 << LEFT_ENC_PIN_B);
-      DDRC &= ~(1 << RIGHT_ENC_PIN_A);
-      DDRC &= ~(1 << RIGHT_ENC_PIN_B);
-
-      //enable pull up resistors
-      PORTD |= (1 << LEFT_ENC_PIN_A);
-      PORTD |= (1 << LEFT_ENC_PIN_B);
-      PORTC |= (1 << RIGHT_ENC_PIN_A);
-      PORTC |= (1 << RIGHT_ENC_PIN_B);
-
-      // tell pin change mask to listen to left encoder pins
-      PCMSK2 |= (1 << LEFT_ENC_PIN_A) | (1 << LEFT_ENC_PIN_B);
-      // tell pin change mask to listen to right encoder pins
-      PCMSK1 |= (1 << RIGHT_ENC_PIN_A) | (1 << RIGHT_ENC_PIN_B);
-
-      // enable PCINT1 and PCINT2 interrupt in the general interrupt mask
-      PCICR |= (1 << PCIE1) | (1 << PCIE2);
-
+      initEncoder();
     #elif defined(MEGA_I2C_NANO_ENC_COUNTER)
       initEncoderInterface();
-      Serial.println("Encoder has been setup");
+      //  Serial.println("Encoder has been setup");
+    #elif defined(ENCODER_DISK_20PPR)
+      initEncoderDisk();
     #endif
 
     initMotorController();
     initElectricalBrakes();
     resetPID();
-    
     setAllBrakes(true, true);                     // set All brakes ON to hold position
 
     #if defined(DEBUG)
@@ -301,19 +358,21 @@ void setup() {
     Serial.println("Brakes has been initialized!");
     Serial.println("PID has been reset");
     #endif
-
   #endif
-
-#ifdef USE_SERVOS                     // Attach servos if used
-  int i;
-  for (i = 0; i < N_SERVOS; i++) {
-    servos[i].initServo(
-      servoPins[i],
-      stepDelay[i],
-      servoInitPosition[i]);
-  }
-#endif
-Serial.println("Setup done");
+  
+  #ifdef USE_SERVOS                     // Attach servos if used
+    int i;
+    for (i = 0; i < N_SERVOS; i++) {
+      servos[i].initServo(
+        servoPins[i],
+        stepDelay[i],
+        servoInitPosition[i]);
+    }
+  #endif
+  #if defined(DEBUG)
+  Serial.println("left \t right");
+  Serial.println(0);
+  #endif
 }
 
 /* Enter the main loop.  Read and parse input from the serial port
@@ -322,26 +381,35 @@ Serial.println("Setup done");
 */
 
 void loop() {
-  // Serial.println("ready:...");
   while (Serial.available() > 0) {
 
     // Read the next character
     chr = Serial.read();
-
+    // Do not echo characters in protocol mode. Echoing corrupts ROS-side responses.
     // Terminate a command with a CR
     if (chr == 13) {
       if (arg == 1) argv1[index] = NULL;
       else if (arg == 2) argv2[index] = NULL;
+      else if (arg == 3) argv3[index] = NULL;
+      g_cmd_rx_us = micros();
       runCommand();
       resetCommand();
     }
     // Use spaces to delimit parts of the command
     else if (chr == ' ') {
       // Step through the arguments
-      if (arg == 0) arg = 1;
+      if (arg == 0) {
+        arg = 1;
+        // index = 0;
+      }
       else if (arg == 1) {
         argv1[index] = NULL;
         arg = 2;
+        index = 0;
+      }
+      else if (arg == 2) {
+        argv2[index] = NULL;
+        arg = 3;
         index = 0;
       }
       continue;
@@ -354,35 +422,47 @@ void loop() {
         argv1[index] = chr;
         index++;
       } else if (arg == 2) {
-        argv2[index] = chr;
-        index++;
+        if (index < (int)sizeof(argv2) - 1) {
+          argv2[index] = chr;
+          index++;
+        }
+      } else if (arg == 3) {
+        if (index < (int)sizeof(argv3) - 1) {
+          argv3[index] = chr;
+          index++;
+        }
       }
     }
   }
-
-// If we are using base control, run a PID calculation at the appropriate intervals
-#ifdef USE_BASE
   
-  if (millis() > nextPID) {
-    updatePID();
-    // printDebugMsg();
-    nextPID += PID_INTERVAL;
-  }
+  // If we are using base control, run a PID calculation at the appropriate intervals
+  #ifdef USE_BASE  
+    if (millis() > nextPID) {
+      updatePID();
+      g_last_pid_update_us = micros();
+      // printDebugMsg();
+      nextPID += PID_INTERVAL;
+    }
+    // Check to see if we have exceeded the auto-stop interval
+    if ((millis() - lastMotorCommand) > AUTO_STOP_INTERVAL) {
+      setMotorSpeeds(0, 0);
+      moving = 0;
+      setAllBrakes(true, true);
+      if (!g_in_timeout_safe_stop) {
+        g_timeout_count++;
+        g_safe_stop_count++;
+        g_status_code = STATUS_COMMAND_TIMEOUT;
+        g_in_timeout_safe_stop = true;
+      }
+    }
+  #endif
 
-  // Check to see if we have exceeded the auto-stop interval
-  if ((millis() - lastMotorCommand) > AUTO_STOP_INTERVAL) {
-    setMotorSpeeds(0, 0);
-    moving = 0;
-    setAllBrakes(true, true);
-  }
-#endif
-
-// Sweep servos
-#ifdef USE_SERVOS
-  int i;
-  for (i = 0; i < N_SERVOS; i++) {
-    servos[i].doSweep();
-  }
-  
-#endif
+  // Sweep servos
+  #ifdef USE_SERVOS
+    int i;
+    for (i = 0; i < N_SERVOS; i++) {
+      servos[i].doSweep();
+//      servos[i].jumpSweep();
+    }
+  #endif
 }

@@ -12,6 +12,12 @@
   #define LEFT_MOTOR_FORWARD    10
   #define RIGHT_MOTOR_ENABLE    12
   #define LEFT_MOTOR_ENABLE     13
+  
+#elif defined(L298_MOTOR_CUSTOM)
+  #define RIGHT_MOTOR_BACKWARD  5
+  #define LEFT_MOTOR_BACKWARD   6
+  #define RIGHT_MOTOR_FORWARD   9
+  #define LEFT_MOTOR_FORWARD    10
 
 #elif defined(CUSTOM_ELECTRIC_BIKE_DRIVER)
   #define RIGHT_MOTOR_PWM_PIN       7   // TODO: change to a correct Pin Number

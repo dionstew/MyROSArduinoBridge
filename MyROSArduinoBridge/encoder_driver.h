@@ -18,6 +18,7 @@
   #define RIGHT_ENC_PIN_A PC4  //pin A4
   #define RIGHT_ENC_PIN_B PC5   //pin A5
   
+  void initEncoder();
   long readEncoder(int i);
   void resetEncoder(int i);
   void resetEncoders();
@@ -41,15 +42,32 @@
   #define CMD_RESET_TICKS   0x01    // Reset command for encoder
   
   struct EncoderData {
-    long ticks;
+    long ticks = 0;
   };
 
   void initEncoderInterface();
   void readEncoder_I2C(uint8_t address, EncoderData &data);
-
   void resetEncoder_I2C(int i);
   void resetEncoders_I2C();
 
+#elif defined(ENCODER_DISK_20PPR)
+  #include <util/atomic.h>
+  
+  #define DIR_PIN_A1 RIGHT_MOTOR_FORWARD
+  #define DIR_PIN_A2 RIGHT_MOTOR_BACKWARD
+  #define DIR_PIN_B1 LEFT_MOTOR_FORWARD
+  #define DIR_PIN_B2 LEFT_MOTOR_BACKWARD
+  
+  #define ENC_PIN_A 2
+  #define ENC_PIN_B 3
+  
+  struct EncoderData {
+    long ticks;
+  };
+  
+  void initEncoderDisk();
+  void readEncoder_20PPR(int i, EncoderData& data);
+  void resetEncoder_20PPR();
 #endif
 
 #endif

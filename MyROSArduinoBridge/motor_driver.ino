@@ -89,6 +89,43 @@
     setMotorSpeed(RIGHT, rightSpeed);
   }
 
+#elif defined(L298_MOTOR_CUSTOM)
+  void initMotorController() {
+  pinMode(RIGHT_MOTOR_BACKWARD, OUTPUT);
+  pinMode(RIGHT_MOTOR_FORWARD, OUTPUT);
+  pinMode(LEFT_MOTOR_BACKWARD, OUTPUT);
+  pinMode(LEFT_MOTOR_FORWARD, OUTPUT);
+  }
+  
+  void setMotorSpeed(int i, int spd) {
+    unsigned char reverse = 0;
+  
+    if (spd < 0)
+    {
+      spd = -spd;
+      reverse = 1;
+    }
+    if (spd > 255)
+    {
+      spd = 255;
+      }
+    
+    if (i == LEFT) { 
+      g_left_dir_sign = (spd == 0) ? 0 : (reverse ? -1 : +1);
+      if      (reverse == 0) { analogWrite(LEFT_MOTOR_FORWARD, spd); analogWrite(LEFT_MOTOR_BACKWARD, 0); }
+      else if (reverse == 1) { analogWrite(LEFT_MOTOR_BACKWARD, spd); analogWrite(LEFT_MOTOR_FORWARD, 0); }
+    }
+    else /*if (i == RIGHT) //no need for condition*/ {
+      g_right_dir_sign = (spd == 0) ? 0 : (reverse ? -1 : +1);
+      if      (reverse == 0) { analogWrite(RIGHT_MOTOR_FORWARD, spd); analogWrite(RIGHT_MOTOR_BACKWARD, 0); }
+      else if (reverse == 1) { analogWrite(RIGHT_MOTOR_BACKWARD, spd); analogWrite(RIGHT_MOTOR_FORWARD, 0); }
+    }
+  }
+  
+  void setMotorSpeeds(int leftSpeed, int rightSpeed) {
+    setMotorSpeed(LEFT, leftSpeed);
+    setMotorSpeed(RIGHT, rightSpeed);
+  }
 
 #elif defined(CUSTOM_ELECTRIC_BIKE_DRIVER)
   
